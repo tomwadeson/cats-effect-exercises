@@ -29,37 +29,60 @@ object WorkerPool extends IOApp {
 
   trait WorkerPool[F[_], A, B] {
     def exec(a: A): F[B]
+    def addWorker(worker: Worker[F, A, B]): F[Unit]
+    def removeAllWorkers: F[Unit]
   }
 
   object WorkerPool {
 
     def of[F[_] : Concurrent, A, B](workers: List[Worker[F, A, B]]): F[WorkerPool[F, A, B]] = {
 
-      def adaptWorker(worker: Worker[F, A, B], workerChannel: MVar[F, Worker[F, A, B]]): Worker[F, A, B] = {
+      def adaptWorker(worker: Worker[F, A, B], workerChannelRef: Ref[F, MVar[F, Worker[F, A, B]]]): Worker[F, A, B] = {
         lazy val adapted: Worker[F, A, B] =
-          a => worker(a) <* workerChannel.put(adapted).start
+          a => worker(a) <* workerChannelRef.get.flatMap(_.put(adapted)).start
 
         adapted
       }
 
+      def addWorkerInternal(worker: Worker[F, A, B], workerChannelRef: Ref[F, MVar[F, Worker[F, A, B]]]): F[Unit] =
+        workerChannelRef.get.flatMap(_.put(adaptWorker(worker, workerChannelRef))).start.void
+
       for {
         workerChannel <- MVar.empty[F, Worker[F, A, B]]
-        _ <- workers.traverse_(worker => workerChannel.put(adaptWorker(worker, workerChannel)).start)
+        workerChannelRef <- Ref[F].of(workerChannel)
+        _ <- workers.traverse_(addWorkerInternal(_, workerChannelRef))
       } yield new WorkerPool[F, A, B] {
+
         override def exec(a: A): F[B] =
-          workerChannel.take.flatMap(worker => worker(a))
+          workerChannelRef.get.flatMap(_.take.flatMap(worker => worker(a)))
+
+        override def addWorker(worker: Worker[F, A, B]): F[Unit] =
+          addWorkerInternal(worker, workerChannelRef)
+
+        override def removeAllWorkers: F[Unit] =
+          MVar.empty[F, Worker[F, A, B]].flatMap(workerChannelRef.set)
       }
     }
   }
 
   val testPool: IO[WorkerPool[IO, Int, Int]] =
-    List.range(0, 10)
+    List.range(0, 3)
       .traverse(mkWorker[IO])
       .flatMap(WorkerPool.of[IO, Int, Int])
 
   override def run(args: List[String]): IO[ExitCode] =
     for {
       workerPool <- testPool
-      _ <- List.range(0, 50).parTraverse_(workerPool.exec)
+      _ <- workerPool.exec(1)
+      _ <- workerPool.exec(2)
+      _ <- workerPool.exec(3)
+      _ = println("Removing all workers")
+      _ <- workerPool.removeAllWorkers
+      f <- List.range(0, 20).traverse_(workerPool.exec).start
+      _ <- IO.sleep(2.seconds)
+      _ = println("Adding a worker")
+      newWorker1 <- mkWorker[IO](100)
+      _ <- workerPool.addWorker(newWorker1)
+      _ <- f.join
     } yield ExitCode.Success
 }
