@@ -15,7 +15,9 @@ object WorkerPool extends IOApp {
   def mkWorker[F[_]](id: Int)(implicit F: Sync[F], timer: Timer[F]): F[Worker[F, Int, Int]] =
     Ref[F].of(0).map { counter =>
       def simulateWork: F[Unit] =
-        F.delay(50 + Random.nextInt(450)).map(_.millis).flatMap(timer.sleep)
+        F.delay(50 + Random.nextInt(450)).flatMap { i =>
+          if ((i & 3) == 3) F.raiseError[Int](new Exception) else F.pure(i)
+        }.map(_.millis).flatMap(timer.sleep)
 
       def report: F[Unit] =
         counter.get.flatMap(i => F.delay(println(s"Total processed by $id: $i")))
@@ -38,8 +40,9 @@ object WorkerPool extends IOApp {
     def of[F[_] : Concurrent, A, B](workers: List[Worker[F, A, B]]): F[WorkerPool[F, A, B]] = {
 
       def adaptWorker(worker: Worker[F, A, B], workerChannelRef: Ref[F, MVar[F, Worker[F, A, B]]]): Worker[F, A, B] = {
+
         lazy val adapted: Worker[F, A, B] =
-          a => worker(a) <* workerChannelRef.get.flatMap(_.put(adapted)).start
+          a => worker(a).guarantee(workerChannelRef.get.flatMap(_.put(adapted).start.void))
 
         adapted
       }
@@ -73,12 +76,12 @@ object WorkerPool extends IOApp {
   override def run(args: List[String]): IO[ExitCode] =
     for {
       workerPool <- testPool
-      _ <- workerPool.exec(1)
-      _ <- workerPool.exec(2)
-      _ <- workerPool.exec(3)
+      _ <- workerPool.exec(1).attempt
+      _ <- workerPool.exec(2).attempt
+      _ <- workerPool.exec(3).attempt
       _ = println("Removing all workers")
       _ <- workerPool.removeAllWorkers
-      f <- List.range(0, 20).traverse_(workerPool.exec).start
+      f <- List.range(0, 20).traverse_(workerPool.exec(_).attempt).start
       _ <- IO.sleep(2.seconds)
       _ = println("Adding a worker")
       newWorker1 <- mkWorker[IO](100)
