@@ -61,14 +61,23 @@ object WorkerPool extends IOApp {
         new WorkerPool[F, A, B] {
 
           override def exec(a: A): F[B] =
-            workerChannelRef.get.flatMap(_.take.flatMap(worker => worker(a)))
+            for {
+              workerChannel <- workerChannelRef.get
+              worker        <- workerChannel.take
+              b             <- worker(a)
+            } yield b
 
           override def addWorker(worker: Worker[F, A, B]): F[Unit] =
-            workerChannelRef.get.flatMap(workerChannel =>
-              addWorkerInternal(adaptWorker(worker, workerChannel), workerChannel))
+            for {
+              workerChannel <- workerChannelRef.get
+              _             <- addWorkerInternal(adaptWorker(worker, workerChannel), workerChannel)
+            } yield ()
 
           override def removeAllWorkers: F[Unit] =
-            MVar.empty[F, Worker[F, A, B]].flatMap(workerChannelRef.set)
+            for {
+              newWorkerChannel <- MVar.empty[F, Worker[F, A, B]]
+              _                <- workerChannelRef.set(newWorkerChannel)
+            } yield ()
         }
     }
   }
