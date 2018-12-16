@@ -45,18 +45,18 @@ object WorkerPool extends IOApp {
       def adaptWorker(worker: Worker[F, A, B], workerChannelRef: Ref[F, MVar[F, Worker[F, A, B]]]): Worker[F, A, B] = {
 
         lazy val adapted: Worker[F, A, B] =
-          a => worker(a).guarantee(workerChannelRef.get.flatMap(_.put(adapted).start.void))
+          a => worker(a).guarantee(addWorkerInternal(adapted, workerChannelRef))
 
         adapted
       }
 
       def addWorkerInternal(worker: Worker[F, A, B], workerChannelRef: Ref[F, MVar[F, Worker[F, A, B]]]): F[Unit] =
-        workerChannelRef.get.flatMap(_.put(adaptWorker(worker, workerChannelRef))).start.void
+        workerChannelRef.get.flatMap(_.put(worker)).start.void
 
       for {
         workerChannel    <- MVar.empty[F, Worker[F, A, B]]
         workerChannelRef <- Ref[F].of(workerChannel)
-        _                <- workers.traverse_(addWorkerInternal(_, workerChannelRef))
+        _                <- workers.traverse_(worker => addWorkerInternal(adaptWorker(worker, workerChannelRef), workerChannelRef))
       } yield
         new WorkerPool[F, A, B] {
 
@@ -64,7 +64,7 @@ object WorkerPool extends IOApp {
             workerChannelRef.get.flatMap(_.take.flatMap(worker => worker(a)))
 
           override def addWorker(worker: Worker[F, A, B]): F[Unit] =
-            addWorkerInternal(worker, workerChannelRef)
+            addWorkerInternal(adaptWorker(worker, workerChannelRef), workerChannelRef)
 
           override def removeAllWorkers: F[Unit] =
             MVar.empty[F, Worker[F, A, B]].flatMap(workerChannelRef.set)
